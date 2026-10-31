@@ -1,0 +1,24 @@
+{
+  "name": "techboy-stream-backend",
+  "version": "1.0.0",
+  "description": "TechBoy TV Stream and Download Resolver Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "express",
+    "streaming",
+    "vidlink",
+    "hls",
+    "techboy"
+  ],
+  "author": "TechBoy TV",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "express": "^4.21.1"
+  }
+}
