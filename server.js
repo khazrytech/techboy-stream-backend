@@ -8,248 +8,259 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Base URLs & Headers
-const VIDLINK_BASE = 'https://vidlink.pro';
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
+// Official NHDAPI Base URL & Headers
+const NHDAPI_BASE = 'https://nhdapi.st';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const DEFAULT_HEADERS = {
     'User-Agent': USER_AGENT,
-    'Referer': `${VIDLINK_BASE}/`,
-    'Origin': VIDLINK_BASE,
+    'Referer': `${NHDAPI_BASE}/`,
     'Accept': '*/*'
 };
+
+/**
+ * Builds customized NHDAPI Embed URL with TechBoy TV Glass UI & Multi-Audio / Download options
+ */
+function buildNhdEmbedUrl({ type, id, season = 1, episode = 1, query = {} }) {
+    const basePath = type === 'tv'
+        ? `${NHDAPI_BASE}/embed/tv/${id}/${season}/${episode}`
+        : `${NHDAPI_BASE}/embed/movie/${id}`;
+
+    const params = new URLSearchParams({
+        autoplay: query.autoplay || 'true',
+        audio: query.audio || 'true',
+        title: query.title || 'true',
+        download: query.download || 'true',
+        setting: query.setting || 'true',
+        chromecast: query.chromecast || 'true',
+        pip: query.pip || 'true',
+        primarycolor: (query.primarycolor || '00E5FF').replace('#', ''),
+        secondarycolor: (query.secondarycolor || '8B5CF6').replace('#', ''),
+        iconcolor: (query.iconcolor || 'FFFFFF').replace('#', ''),
+        glasscolor: (query.glasscolor || '000000').replace('#', ''),
+        glassopacity: query.glassopacity || '65',
+        glassblur: query.glassblur || '20'
+    });
+
+    if (type === 'tv') {
+        params.set('autonext', query.autonext || 'true');
+        params.set('episodelist', query.episodelist || 'true');
+        params.set('nextbutton', query.nextbutton || 'true');
+    }
+    if (query.progress) params.set('progress', String(query.progress));
+    if (query.server) params.set('server', String(query.server));
+    if (query.lang) params.set('lang', String(query.lang));
+    if (query.language) params.set('language', String(query.language));
+
+    return `${basePath}?${params.toString()}`;
+}
 
 // Health Check
 app.get('/', (req, res) => {
     res.json({
         status: 'online',
-        server: 'TechBoy TV Backend Engine',
-        version: '1.1.0',
+        server: 'TechBoy TV Backend Engine (NHDAPI Powered)',
+        provider: NHDAPI_BASE,
+        version: '2.0.0',
         endpoints: {
-            movie: '/api/download/movie/:tmdbId',
-            tv: '/api/download/tv/:tmdbId/:season/:episode',
+            embedMovie: '/api/embed/movie/:tmdbId',
+            embedTv: '/api/embed/tv/:tmdbId/:season/:episode',
+            downloadMovie: '/api/download/movie/:tmdbId',
+            downloadTv: '/api/download/tv/:tmdbId/:season/:episode',
             proxy: '/api/proxy?url='
         }
     });
 });
 
 /**
- * Checks whether a given string is a real stream URL (.m3u8, .mp4, etc.) and not an HTML landing page
+ * Official NHDAPI Movie Embed & Download Metadata Endpoint
+ */
+app.get('/api/embed/movie/:tmdbId', (req, res) => {
+    const { tmdbId } = req.params;
+    return res.json({
+        success: true,
+        provider: 'nhdapi.st',
+        type: 'movie',
+        id: tmdbId,
+        embedUrl: buildNhdEmbedUrl({ type: 'movie', id: tmdbId, query: req.query }),
+        downloadPortalUrl: `${NHDAPI_BASE}/dl/movie/${tmdbId}`
+    });
+});
+
+/**
+ * Official NHDAPI TV Show Embed & Download Metadata Endpoint
+ */
+app.get('/api/embed/tv/:tmdbId/:season/:episode', (req, res) => {
+    const { tmdbId, season, episode } = req.params;
+    return res.json({
+        success: true,
+        provider: 'nhdapi.st',
+        type: 'tv',
+        id: tmdbId,
+        season: Number(season) || 1,
+        episode: Number(episode) || 1,
+        embedUrl: buildNhdEmbedUrl({ type: 'tv', id: tmdbId, season, episode, query: req.query }),
+        downloadPortalUrl: `${NHDAPI_BASE}/dl/tv/${tmdbId}/${season}/${episode}`
+    });
+});
+
+/**
+ * Checks whether a given string is a real stream URL (.m3u8, .mp4, .mkv, etc.) and not an HTML page
  */
 function isRealStreamUrl(url) {
     if (!url || typeof url !== 'string') return false;
     const lower = url.toLowerCase();
-    if (lower.includes('.html') || lower.includes('/embed/') || lower.includes('vs_src.php')) {
+    if (lower.includes('.html') || lower.includes('/embed/') || lower.includes('/dl/') || lower.includes('vs_src.php')) {
         return false;
     }
-    return lower.includes('.m3u8') || lower.includes('.mp4') || lower.includes('.mpd') ||
+    return lower.includes('.m3u8') || lower.includes('.mp4') || lower.includes('.mkv') || lower.includes('.mpd') ||
            lower.includes('/proxy/') || lower.includes('/sacdn/') || lower.includes('flooderrr');
 }
 
 /**
- * Resolve Movie Stream / Download URL
+ * Resolve Movie Download / Stream Info (NHDAPI Primary)
  */
 app.get('/api/download/movie/:tmdbId', async (req, res) => {
     const { tmdbId } = req.params;
 
-    if (!tmdbId || isNaN(tmdbId)) {
+    if (!tmdbId) {
         return res.status(400).json({
             success: false,
-            message: 'TMDB ID lazima iwe namba sahihi.'
+            message: 'TMDB au IMDB ID inahitajika.'
         });
     }
 
+    const embedUrl = buildNhdEmbedUrl({ type: 'movie', id: tmdbId, query: req.query });
+    const downloadPortalUrl = `${NHDAPI_BASE}/dl/movie/${tmdbId}`;
+
     try {
         let streamUrl = null;
-        let qualities = {};
 
-        // 1. Try VidLink API endpoint
+        // Optional direct stream fallback check
         try {
-            const vidlinkResp = await axios.get(`${VIDLINK_BASE}/api/b/movie/${tmdbId}?multiLang=0`, {
+            const vsResp = await axios.get(`https://vsembed.ru/vs_src.php?type=movie&id=${tmdbId}`, {
                 headers: {
-                    ...DEFAULT_HEADERS,
-                    'X-Playback-Environment': 'standard'
+                    'User-Agent': USER_AGENT,
+                    'Referer': `https://vsembed.ru/embed/movie/${tmdbId}/`
                 },
-                timeout: 5000
+                timeout: 4500
             });
 
-            if (vidlinkResp.data && vidlinkResp.data.stream) {
-                const s = vidlinkResp.data.stream;
-                const candidate = s.playlist || s.qualities?.['1080p']?.url || s.qualities?.['720p']?.url;
-                if (isRealStreamUrl(candidate)) {
-                    streamUrl = candidate;
-                    qualities = s.qualities || {};
-                }
-            }
-        } catch (e) {
-            console.log(`[Movie] VidLink API miss for ${tmdbId}`);
-        }
-
-        // 2. Try VidSrc unpack flow if direct API missed
-        if (!streamUrl) {
-            try {
-                const vsResp = await axios.get(`https://vsembed.ru/vs_src.php?type=movie&id=${tmdbId}`, {
+            const landingUrl = vsResp.data?.src;
+            if (landingUrl && landingUrl.startsWith('http')) {
+                const landingHost = new URL(landingUrl).origin;
+                const landingResp = await axios.get(landingUrl, {
                     headers: {
                         'User-Agent': USER_AGENT,
-                        'Referer': `https://vsembed.ru/embed/movie/${tmdbId}/`
+                        'Referer': 'https://vsembed.ru/'
                     },
-                    timeout: 5000
+                    timeout: 4500
                 });
 
-                const landingUrl = vsResp.data?.src;
-                if (landingUrl && landingUrl.startsWith('http')) {
-                    const landingHost = new URL(landingUrl).origin;
-                    const landingResp = await axios.get(landingUrl, {
+                const playerUrlMatch = landingResp.data?.match(/"playerUrl"\s*:\s*"([^"]+)"/);
+                if (playerUrlMatch) {
+                    const playerPath = playerUrlMatch[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+                    const fullPlayerUrl = playerPath.startsWith('http') ? playerPath : `${landingHost}${playerPath}`;
+
+                    const playerResp = await axios.get(fullPlayerUrl, {
                         headers: {
                             'User-Agent': USER_AGENT,
-                            'Referer': 'https://vsembed.ru/'
+                            'Referer': landingUrl
                         },
-                        timeout: 5000
+                        timeout: 4500
                     });
 
-                    const playerUrlMatch = landingResp.data?.match(/"playerUrl"\s*:\s*"([^"]+)"/);
-                    if (playerUrlMatch) {
-                        const playerPath = playerUrlMatch[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-                        const fullPlayerUrl = playerPath.startsWith('http') ? playerPath : `${landingHost}${playerPath}`;
+                    const apiMatch = playerResp.data?.match(/"api"\s*:\s*"([^"]+)"/);
+                    const tokenMatch = playerResp.data?.match(/"apiToken"\s*:\s*"([^"]+)"/);
 
-                        const playerResp = await axios.get(fullPlayerUrl, {
+                    if (apiMatch && tokenMatch) {
+                        const rawApi = apiMatch[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+                        const token = tokenMatch[1];
+                        const sep = rawApi.includes('?') ? '&' : '?';
+                        const streamDataUrl = `${rawApi}${sep}api_token=${encodeURIComponent(token)}`;
+
+                        const streamDataResp = await axios.get(streamDataUrl, {
                             headers: {
                                 'User-Agent': USER_AGENT,
-                                'Referer': landingUrl
+                                'Referer': `${landingHost}/`,
+                                'Origin': landingHost
                             },
-                            timeout: 5000
+                            timeout: 4500
                         });
 
-                        const apiMatch = playerResp.data?.match(/"api"\s*:\s*"([^"]+)"/);
-                        const tokenMatch = playerResp.data?.match(/"apiToken"\s*:\s*"([^"]+)"/);
-
-                        if (apiMatch && tokenMatch) {
-                            const rawApi = apiMatch[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-                            const token = tokenMatch[1];
-                            const sep = rawApi.includes('?') ? '&' : '?';
-                            const streamDataUrl = `${rawApi}${sep}api_token=${encodeURIComponent(token)}`;
-
-                            const streamDataResp = await axios.get(streamDataUrl, {
-                                headers: {
-                                    'User-Agent': USER_AGENT,
-                                    'Referer': `${landingHost}/`,
-                                    'Origin': landingHost
-                                },
-                                timeout: 5000
-                            });
-
-                            const streamUrls = streamDataResp.data?.data?.stream_urls;
-                            if (Array.isArray(streamUrls) && streamUrls.length > 0) {
-                                streamUrl = streamUrls[0];
-                            }
+                        const streamUrls = streamDataResp.data?.data?.stream_urls;
+                        if (Array.isArray(streamUrls) && streamUrls.length > 0) {
+                            streamUrl = streamUrls[0];
                         }
                     }
                 }
-            } catch (e) {
-                console.log(`[Movie] VidSrc unpack miss for ${tmdbId}: ${e.message}`);
             }
+        } catch (e) {
+            console.log(`[Movie] Direct fallback miss for ${tmdbId}: ${e.message}`);
         }
 
-        // Return real stream if found
         if (streamUrl && isRealStreamUrl(streamUrl)) {
             return res.json({
                 success: true,
-                tmdbId: parseInt(tmdbId),
+                provider: 'nhdapi.st',
+                tmdbId: isNaN(tmdbId) ? tmdbId : parseInt(tmdbId),
                 type: 'stream',
                 downloadUrl: streamUrl,
-                headersRequired: {
-                    'Referer': `${VIDLINK_BASE}/`,
-                    'User-Agent': USER_AGENT
-                },
-                qualities: qualities
+                downloadPortalUrl,
+                embedUrl,
+                headersRequired: DEFAULT_HEADERS
             });
         }
 
-        // Inform app that server did not resolve a direct m3u8 so app should use its high-speed in-app resolver
         return res.json({
             success: false,
-            tmdbId: parseInt(tmdbId),
-            type: 'in_app_resolver_needed',
-            embedUrl: `${VIDLINK_BASE}/movie/${tmdbId}`,
-            message: 'Direct stream haikupatikana moja kwa moja toka API. Inatumia in-app resolver.'
+            provider: 'nhdapi.st',
+            tmdbId: isNaN(tmdbId) ? tmdbId : parseInt(tmdbId),
+            type: 'nhdapi_portal',
+            downloadPortalUrl,
+            embedUrl,
+            message: 'Tumia NHDAPI Direct Download Portal (/dl/movie) au in-app resolver.'
         });
-
     } catch (error) {
-        console.error(`Error resolving movie ${tmdbId}:`, error.message);
         return res.status(500).json({
             success: false,
+            provider: 'nhdapi.st',
             message: 'Hitilafu ya seva: ' + error.message,
-            embedUrl: `${VIDLINK_BASE}/movie/${tmdbId}`
+            downloadPortalUrl,
+            embedUrl
         });
     }
 });
 
 /**
- * Resolve TV Series Stream / Download URL
+ * Resolve TV Series Download / Stream Info (NHDAPI Primary)
  */
 app.get('/api/download/tv/:tmdbId/:season/:episode', async (req, res) => {
     const { tmdbId, season, episode } = req.params;
 
-    if (!tmdbId || isNaN(tmdbId)) {
-        return res.status(400).json({ success: false, message: 'TMDB ID is required' });
+    if (!tmdbId) {
+        return res.status(400).json({ success: false, message: 'TMDB au IMDB ID inahitajika.' });
     }
 
-    try {
-        let streamUrl = null;
+    const s = parseInt(season) || 1;
+    const ep = parseInt(episode) || 1;
+    const embedUrl = buildNhdEmbedUrl({ type: 'tv', id: tmdbId, season: s, episode: ep, query: req.query });
+    const downloadPortalUrl = `${NHDAPI_BASE}/dl/tv/${tmdbId}/${s}/${ep}`;
 
-        // Try VidLink TV API
-        try {
-            const vidlinkResp = await axios.get(`${VIDLINK_BASE}/api/b/tv/${tmdbId}/${season}/${episode}?multiLang=0`, {
-                headers: {
-                    ...DEFAULT_HEADERS,
-                    'X-Playback-Environment': 'standard'
-                },
-                timeout: 5000
-            });
-
-            if (vidlinkResp.data && vidlinkResp.data.stream) {
-                const s = vidlinkResp.data.stream;
-                const candidate = s.playlist || s.qualities?.['1080p']?.url || s.qualities?.['720p']?.url;
-                if (isRealStreamUrl(candidate)) {
-                    streamUrl = candidate;
-                }
-            }
-        } catch (e) {}
-
-        if (streamUrl && isRealStreamUrl(streamUrl)) {
-            return res.json({
-                success: true,
-                tmdbId: parseInt(tmdbId),
-                season: parseInt(season),
-                episode: parseInt(episode),
-                type: 'stream',
-                downloadUrl: streamUrl,
-                headersRequired: {
-                    'Referer': `${VIDLINK_BASE}/`,
-                    'User-Agent': USER_AGENT
-                }
-            });
-        }
-
-        return res.json({
-            success: false,
-            tmdbId: parseInt(tmdbId),
-            season: parseInt(season),
-            episode: parseInt(episode),
-            type: 'in_app_resolver_needed',
-            embedUrl: `${VIDLINK_BASE}/tv/${tmdbId}/${season}/${episode}`
-        });
-
-    } catch (error) {
-        return res.status(500).json({
-            success: false,
-            message: error.message
-        });
-    }
+    return res.json({
+        success: false,
+        provider: 'nhdapi.st',
+        tmdbId: isNaN(tmdbId) ? tmdbId : parseInt(tmdbId),
+        season: s,
+        episode: ep,
+        type: 'nhdapi_portal',
+        downloadPortalUrl,
+        embedUrl
+    });
 });
 
 /**
- * Resilient Video Segment Proxy
+ * Resilient Video & File Stream Proxy (Supports HTTP Range for MP4/MKV resume & seeking)
  */
 app.get('/api/proxy', async (req, res) => {
     const targetUrl = req.query.url;
@@ -258,24 +269,30 @@ app.get('/api/proxy', async (req, res) => {
     }
 
     try {
+        const proxyHeaders = {
+            'User-Agent': USER_AGENT,
+            'Referer': `${NHDAPI_BASE}/`,
+            'Accept': '*/*'
+        };
+        if (req.headers.range) {
+            proxyHeaders['Range'] = req.headers.range;
+        }
+
         const response = await axios({
             method: 'get',
             url: targetUrl,
-            headers: {
-                'User-Agent': USER_AGENT,
-                'Referer': `${VIDLINK_BASE}/`,
-                'Accept': '*/*'
-            },
+            headers: proxyHeaders,
             responseType: 'stream',
-            timeout: 15000
+            timeout: 25000,
+            validateStatus: (status) => status >= 200 && status < 400
         });
 
-        // Forward content-type and cache-control headers
-        if (response.headers['content-type']) {
-            res.setHeader('Content-Type', response.headers['content-type']);
-        }
-        if (response.headers['content-length']) {
-            res.setHeader('Content-Length', response.headers['content-length']);
+        res.status(response.status);
+        const forwardHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'content-disposition'];
+        for (const h of forwardHeaders) {
+            if (response.headers[h]) {
+                res.setHeader(h, response.headers[h]);
+            }
         }
         res.setHeader('Access-Control-Allow-Origin', '*');
 
@@ -287,7 +304,8 @@ app.get('/api/proxy', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`===============================================`);
-    console.log(`TechBoy TV Backend Engine v1.1.0 is running on port ${PORT}`);
-    console.log(`Test URL: http://localhost:${PORT}/api/download/movie/550`);
+    console.log(`TechBoy TV Backend Engine v2.0.0 (NHDAPI) running on port ${PORT}`);
+    console.log(`Test Movie Embed: http://localhost:${PORT}/api/embed/movie/550`);
+    console.log(`Test Movie DL:    http://localhost:${PORT}/api/download/movie/550`);
     console.log(`===============================================`);
 });
