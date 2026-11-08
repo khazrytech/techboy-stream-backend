@@ -12,6 +12,63 @@ app.use(express.json());
 const NHDAPI_BASE = 'https://nhdapi.st';
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+// ============================================================================
+// SONICPESA PAYMENT GATEWAY CONFIGURATION (Render.com Environment Variables)
+// ============================================================================
+const SONICPESA_BASE_URL = (process.env.SONICPESA_BASE_URL || 'https://api.sonicpesa.com/api/v1').replace(/\/+$/, '');
+
+function getSonicPesaCredentials() {
+    const apiKey = (
+        process.env.SONICPESA_API_KEY ||
+        process.env.SONICPESA_KEY ||
+        process.env.X_API_KEY ||
+        process.env.API_KEY ||
+        ''
+    ).trim();
+
+    const apiSecret = (
+        process.env.SONICPESA_API_SECRET ||
+        process.env.SONICPESA_SECRET ||
+        process.env.X_API_SECRET ||
+        process.env.API_SECRET ||
+        ''
+    ).trim();
+
+    return { apiKey, apiSecret };
+}
+
+function getSonicPesaHeaders() {
+    const { apiKey, apiSecret } = getSonicPesaCredentials();
+    const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'User-Agent': 'TechBoyTV-Backend/2.1'
+    };
+    if (apiKey) {
+        headers['X-API-KEY'] = apiKey;
+        headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    if (apiSecret) {
+        headers['X-API-SECRET'] = apiSecret;
+    }
+    return headers;
+}
+
+/**
+ * Normalizes Tanzanian phone numbers into 255XXXXXXXXX format required by SonicPesa.
+ * Accepts: 0712345678, 0612345678, +255712345678, 255712345678, 712345678
+ */
+function normalizeTzPhone(rawPhone) {
+    if (!rawPhone) return '';
+    let digits = String(rawPhone).replace(/\D/g, '');
+    if (digits.startsWith('0') && digits.length === 10) {
+        digits = '255' + digits.substring(1);
+    } else if ((digits.startsWith('7') || digits.startsWith('6')) && digits.length === 9) {
+        digits = '255' + digits;
+    }
+    return digits;
+}
+
 const DEFAULT_HEADERS = {
     'User-Agent': USER_AGENT,
     'Referer': `${NHDAPI_BASE}/`,
@@ -57,17 +114,22 @@ function buildNhdEmbedUrl({ type, id, season = 1, episode = 1, query = {} }) {
 
 // Health Check
 app.get('/', (req, res) => {
+    const { apiKey } = getSonicPesaCredentials();
     res.json({
         status: 'online',
-        server: 'TechBoy TV Backend Engine (NHDAPI Powered)',
+        server: 'TechBoy TV Backend Engine (NHDAPI + SonicPesa Powered)',
         provider: NHDAPI_BASE,
-        version: '2.0.0',
+        sonicPesaConfigured: Boolean(apiKey),
+        version: '2.1.0',
         endpoints: {
             embedMovie: '/api/embed/movie/:tmdbId',
             embedTv: '/api/embed/tv/:tmdbId/:season/:episode',
             downloadMovie: '/api/download/movie/:tmdbId',
             downloadTv: '/api/download/tv/:tmdbId/:season/:episode',
-            proxy: '/api/proxy?url='
+            proxy: '/api/proxy?url=',
+            donateInitiate: '/api/donate/initiate',
+            donateStatus: '/api/donate/status',
+            donateWebhook: '/api/donate/webhook'
         }
     });
 });
@@ -302,10 +364,218 @@ app.get('/api/proxy', async (req, res) => {
     }
 });
 
+// ============================================================================
+// SONICPESA DONATION & SERVER SUPPORT ENDPOINTS
+// ============================================================================
+
+/**
+ * Initiates a SonicPesa USSD Push order for Server Contribution (minimum TZS 1,000)
+ * POST /api/donate/initiate (or /api/payment/create_order)
+ * Body: { phone: "07XXXXXXXX", amount: 1000, name?: "Mdau", email?: "..." }
+ */
+async function handleCreateDonationOrder(req, res) {
+    try {
+        const { apiKey } = getSonicPesaCredentials();
+        if (!apiKey) {
+            return res.status(503).json({
+                success: false,
+                status: 'error',
+                message: 'SONICPESA_API_KEY haijawekwa kwenye Render Environment Variables.'
+            });
+        }
+
+        const rawPhone = req.body?.phone || req.body?.buyer_phone || req.body?.msisdn || '';
+        const rawAmount = Number(req.body?.amount || 0);
+        const buyerName = (req.body?.name || req.body?.buyer_name || 'Mdau wa TechBoy TV').trim() || 'Mdau wa TechBoy TV';
+        const buyerEmail = (req.body?.email || req.body?.buyer_email || 'support@techboytv.app').trim() || 'support@techboytv.app';
+
+        const buyerPhone = normalizeTzPhone(rawPhone);
+        if (!/^255[67]\d{8}$/.test(buyerPhone)) {
+            return res.status(400).json({
+                success: false,
+                status: 'error',
+                message: 'Tafadhali weka namba sahihi ya simu ya Tanzania (mfano 0712345678 au 0655123456).'
+            });
+        }
+
+        if (!rawAmount || isNaN(rawAmount) || rawAmount < 1000) {
+            return res.status(400).json({
+                success: false,
+                status: 'error',
+                message: 'Kiwango cha chini cha kuchangia seva ni TZS 1,000.'
+            });
+        }
+
+        const amountTzs = Math.round(rawAmount);
+        const payload = {
+            buyer_name: buyerName,
+            buyer_email: buyerEmail,
+            buyer_phone: buyerPhone,
+            amount: amountTzs,
+            currency: 'TZS'
+        };
+
+        console.log(`[SonicPesa] Initiating USSD Push -> phone=${buyerPhone}, amount=TZS ${amountTzs}`);
+
+        const spResponse = await axios.post(
+            `${SONICPESA_BASE_URL}/payment/create_order`,
+            payload,
+            {
+                headers: getSonicPesaHeaders(),
+                timeout: 30000,
+                validateStatus: () => true
+            }
+        );
+
+        const data = spResponse.data || {};
+        const orderId =
+            data?.data?.order_id ||
+            data?.order_id ||
+            data?.data?.reference ||
+            data?.reference ||
+            '';
+
+        const isSuccess =
+            (spResponse.status >= 200 && spResponse.status < 300) &&
+            (data?.status === 'success' || data?.success === true || Boolean(orderId));
+
+        if (!isSuccess) {
+            const errMsg =
+                data?.message ||
+                data?.error ||
+                'Imeshindikana kutuma ombi la USSD kwenye simu yako. Hakikisha namba iko sahihi na ujaribu tena.';
+            console.error('[SonicPesa] create_order failed:', spResponse.status, data);
+            return res.status(400).json({
+                success: false,
+                status: 'error',
+                message: errMsg,
+                raw: data
+            });
+        }
+
+        return res.json({
+            success: true,
+            status: 'success',
+            orderId: orderId,
+            amount: amountTzs,
+            phone: buyerPhone,
+            paymentStatus: data?.data?.status || 'PENDING',
+            message: 'Ombi la kuchangia limetumwa kwenye simu yako! Tafadhali weka PIN yako ya M-Pesa / Tigo Pesa / Airtel Money / HaloPesa.',
+            data: data?.data || data
+        });
+    } catch (error) {
+        console.error('[SonicPesa] Exception in handleCreateDonationOrder:', error.message);
+        return res.status(500).json({
+            success: false,
+            status: 'error',
+            message: 'Hitilafu ya kuwasiliana na SonicPesa: ' + error.message
+        });
+    }
+}
+
+app.post('/api/donate/initiate', handleCreateDonationOrder);
+app.post('/api/payment/create_order', handleCreateDonationOrder);
+
+/**
+ * Checks SonicPesa Order Status
+ * POST /api/donate/status (or GET /api/donate/status/:orderId or POST /api/payment/order_status)
+ */
+async function handleCheckDonationStatus(req, res) {
+    try {
+        const { apiKey } = getSonicPesaCredentials();
+        if (!apiKey) {
+            return res.status(503).json({
+                success: false,
+                status: 'error',
+                message: 'SONICPESA_API_KEY haijawekwa kwenye seva.'
+            });
+        }
+
+        const orderId = (
+            req.params?.orderId ||
+            req.body?.order_id ||
+            req.body?.orderId ||
+            req.query?.order_id ||
+            req.query?.orderId ||
+            ''
+        ).trim();
+
+        if (!orderId) {
+            return res.status(400).json({
+                success: false,
+                status: 'error',
+                message: 'order_id inahitajika.'
+            });
+        }
+
+        const spResponse = await axios.post(
+            `${SONICPESA_BASE_URL}/payment/order_status`,
+            { order_id: orderId },
+            {
+                headers: getSonicPesaHeaders(),
+                timeout: 20000,
+                validateStatus: () => true
+            }
+        );
+
+        const data = spResponse.data || {};
+        const rawStatus = String(
+            data?.data?.payment_status ||
+            data?.data?.status ||
+            data?.payment_status ||
+            data?.status ||
+            'PENDING'
+        ).toUpperCase();
+
+        let normalizedStatus = 'PENDING';
+        if (['SUCCESS', 'COMPLETED', 'PAID', 'OK'].includes(rawStatus)) {
+            normalizedStatus = 'SUCCESS';
+        } else if (['CANCELLED', 'CANCELED', 'REJECTED', 'FAILED', 'EXPIRED'].includes(rawStatus)) {
+            normalizedStatus = 'FAILED';
+        }
+
+        return res.json({
+            success: true,
+            orderId,
+            paymentStatus: normalizedStatus,
+            rawStatus,
+            transId: data?.data?.transid || data?.transid || '',
+            amount: data?.data?.amount || data?.amount || 0,
+            data: data?.data || data
+        });
+    } catch (error) {
+        console.error('[SonicPesa] Exception in handleCheckDonationStatus:', error.message);
+        return res.status(500).json({
+            success: false,
+            status: 'error',
+            paymentStatus: 'PENDING',
+            message: 'Hitilafu ya kukagua malipo: ' + error.message
+        });
+    }
+}
+
+app.post('/api/donate/status', handleCheckDonationStatus);
+app.get('/api/donate/status/:orderId', handleCheckDonationStatus);
+app.post('/api/payment/order_status', handleCheckDonationStatus);
+
+/**
+ * SonicPesa Webhook Endpoint
+ * Configure in SonicPesa Dashboard -> https://<your-render-url>/api/donate/webhook
+ */
+app.post('/api/donate/webhook', (req, res) => {
+    try {
+        console.log('[SonicPesa Webhook] Received payment event:', JSON.stringify(req.body));
+        return res.status(200).json({ received: true, status: 'ok' });
+    } catch (e) {
+        return res.status(200).json({ received: true });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`===============================================`);
-    console.log(`TechBoy TV Backend Engine v2.0.0 (NHDAPI) running on port ${PORT}`);
+    console.log(`TechBoy TV Backend Engine v2.1.0 (NHDAPI + SonicPesa) running on port ${PORT}`);
     console.log(`Test Movie Embed: http://localhost:${PORT}/api/embed/movie/550`);
     console.log(`Test Movie DL:    http://localhost:${PORT}/api/download/movie/550`);
+    console.log(`SonicPesa Donate: POST http://localhost:${PORT}/api/donate/initiate`);
     console.log(`===============================================`);
 });
