@@ -18,35 +18,35 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const SONICPESA_BASE_URL = (process.env.SONICPESA_BASE_URL || 'https://api.sonicpesa.com/api/v1').replace(/\/+$/, '');
 
 function getSonicPesaCredentials() {
-    const apiKey = (
+    const rawKey = (
         process.env.SONICPESA_API_KEY ||
         process.env.SONICPESA_KEY ||
         process.env.X_API_KEY ||
         process.env.API_KEY ||
         ''
-    ).trim();
+    ).trim().replace(/^Bearer\s+/i, '');
 
-    const apiSecret = (
+    const rawSecret = (
         process.env.SONICPESA_API_SECRET ||
         process.env.SONICPESA_SECRET ||
         process.env.X_API_SECRET ||
         process.env.API_SECRET ||
         ''
-    ).trim();
+    ).trim().replace(/^Bearer\s+/i, '');
 
-    return { apiKey, apiSecret };
+    return { apiKey: rawKey || rawSecret, apiSecret: rawSecret };
 }
 
-function getSonicPesaHeaders() {
+function getSonicPesaHeaders(overrideKey) {
     const { apiKey, apiSecret } = getSonicPesaCredentials();
+    const effectiveKey = overrideKey || apiKey;
     const headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-        'User-Agent': 'TechBoyTV-Backend/2.1'
+        'User-Agent': 'TechBoyTV-Backend/2.2'
     };
-    if (apiKey) {
-        headers['X-API-KEY'] = apiKey;
-        headers['Authorization'] = `Bearer ${apiKey}`;
+    if (effectiveKey) {
+        headers['X-API-KEY'] = effectiveKey;
     }
     if (apiSecret) {
         headers['X-API-SECRET'] = apiSecret;
